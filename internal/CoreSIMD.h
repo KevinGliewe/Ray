@@ -6007,11 +6007,10 @@ void Ray::NS::IntersectAreaLights(const ray_data_t<S> &r, Span<const light_t> li
         while (!st.empty()) {
             light_stack_entry_t cur = st.pop();
 
-            if (cur.dist > inter_t[ri] || cur.factor == 0.0f) {
+        TRAVERSE:
+            if (cur.dist > inter_t[ri]) {
                 continue;
             }
-
-        TRAVERSE:
             if ((cur.index & LEAF_NODE_BIT) == 0) {
                 const light_cwbvh_node_t &n = nodes[cur.index];
 
@@ -6041,12 +6040,15 @@ void Ray::NS::IntersectAreaLights(const ray_data_t<S> &r, Span<const light_t> li
                     calc_lnode_importance<SS>(n, bbox_min, bbox_max, _ro, value_ptr(importance[0]));
 
                     fvec<SS> total_importance_v = 0.0f;
-                    UNROLLED_FOR_S(i, 8 / SS, { total_importance_v += importance[i]; })
-                    const float total_importance = hsum(total_importance_v);
-                    if (total_importance == 0.0f) {
+                    UNROLLED_FOR_S(i, 8 / SS, {
+                        mask &= ~(simd_cast(importance[i] == 0.0).movemask() << (i * 4));
+                        total_importance_v += importance[i];
+                    })
+                    if (!mask) {
                         continue;
                     }
 
+                    const float total_importance = hsum(total_importance_v);
                     alignas(32) float factors[8];
                     UNROLLED_FOR_S(i, 8 / SS, {
                         importance[i] /= total_importance;

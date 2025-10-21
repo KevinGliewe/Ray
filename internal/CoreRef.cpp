@@ -556,7 +556,6 @@ template <int StackSize, typename T = stack_entry_t> struct TraversalStack {
         if (stack[i + 1].dist < stack[i + 2].dist) {
             std::swap(stack[i + 1], stack[i + 2]);
         }
-
         assert(stack[stack_size - 4].dist >= stack[stack_size - 3].dist &&
                stack[stack_size - 3].dist >= stack[stack_size - 2].dist &&
                stack[stack_size - 2].dist >= stack[stack_size - 1].dist);
@@ -578,7 +577,6 @@ template <int StackSize, typename T = stack_entry_t> struct TraversalStack {
 
             stack[j + 1] = key;
         }
-
 #ifndef NDEBUG
         for (int j = 0; j < count - 1; j++) {
             assert(stack[stack_size - count + j].dist >= stack[stack_size - count + j + 1].dist);
@@ -3550,7 +3548,7 @@ void Ray::Ref::SampleLightSource(const fvec4 &P, const fvec4 &T, const fvec4 &B,
             const fvec4 pvec = cross(ls.L, e2);
             const fvec4 tvec = P - p1, qvec = cross(tvec, e1);
 
-            const float inv_det = 1.0f / dot(e1, pvec);
+            const float inv_det = safe_div(1.0f, dot(e1, pvec));
             const float tri_u = dot(tvec, pvec) * inv_det, tri_v = dot(ls.L, qvec) * inv_det;
 
             lp = (1.0f - tri_u - tri_v) * p1 + tri_u * p2 + tri_v * p3;
@@ -3650,11 +3648,11 @@ void Ray::Ref::IntersectAreaLights(Span<const ray_data_t> rays, Span<const light
         while (!st.empty()) {
             light_stack_entry_t cur = st.pop();
 
-            if (cur.dist > inout_inter.t || cur.factor == 0.0f) {
+        TRAVERSE:
+            assert(cur.factor > 0.0f);
+            if (cur.dist > inout_inter.t) {
                 continue;
             }
-
-        TRAVERSE:
             if ((cur.index & LEAF_NODE_BIT) == 0) {
                 alignas(16) float dist[8];
                 long mask = bbox_test_oct(value_ptr(ro), inv_d, inout_inter.t, nodes[cur.index], dist);
@@ -3662,11 +3660,13 @@ void Ray::Ref::IntersectAreaLights(Span<const ray_data_t> rays, Span<const light
                     fvec4 importance[2];
                     calc_lnode_importance(nodes[cur.index], ro, value_ptr(importance[0]));
 
-                    const float total_importance = hsum(importance[0] + importance[1]);
-                    if (total_importance == 0.0f) {
+                    mask &= ~(simd_cast(importance[0] == 0.0f).movemask() << 0);
+                    mask &= ~(simd_cast(importance[1] == 0.0f).movemask() << 4);
+                    if (!mask) {
                         continue;
                     }
 
+                    const float total_importance = hsum(importance[0] + importance[1]);
                     importance[0] /= total_importance;
                     importance[1] /= total_importance;
 
@@ -3909,11 +3909,13 @@ void Ray::Ref::IntersectAreaLights(Span<const ray_data_t> rays, Span<const light
                     fvec4 importance[2];
                     calc_lnode_importance(nodes[cur.index], ro, value_ptr(importance[0]));
 
-                    const float total_importance = hsum(importance[0] + importance[1]);
-                    if (total_importance == 0.0f) {
+                    mask &= ~(simd_cast(importance[0] == 0.0f).movemask() << 0);
+                    mask &= ~(simd_cast(importance[1] == 0.0f).movemask() << 4);
+                    if (!mask) {
                         continue;
                     }
 
+                    const float total_importance = hsum(importance[0] + importance[1]);
                     importance[0] /= total_importance;
                     importance[1] /= total_importance;
 
