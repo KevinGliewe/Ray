@@ -391,12 +391,13 @@ force_inline long bbox_test_oct(const float o[3], const float inv_d[3], const fl
 }
 
 force_inline long bbox_test_oct(const float o[3], const float inv_d[3], const float t, const cwbvh_node_t &node,
-                                float out_dist[8]) {
+                                const uint32_t accept_mask, float out_dist[8]) {
     // Unpack bounds
     const float ext[3] = {(node.bbox_max[0] - node.bbox_min[0]) / 255.0f,
                           (node.bbox_max[1] - node.bbox_min[1]) / 255.0f,
                           (node.bbox_max[2] - node.bbox_min[2]) / 255.0f};
     alignas(16) float bbox_min[3][8], bbox_max[3][8];
+    alignas(16) uint8_t bitmask[16] = {};
     for (int i = 0; i < 8; ++i) {
         bbox_min[0][i] = bbox_min[1][i] = bbox_min[2][i] = -MAX_DIST;
         bbox_max[0][i] = bbox_max[1][i] = bbox_max[2][i] = MAX_DIST;
@@ -409,6 +410,7 @@ force_inline long bbox_test_oct(const float o[3], const float inv_d[3], const fl
             bbox_max[1][i] = node.bbox_min[1] + node.ch_bbox_max[1][i] * ext[1];
             bbox_max[2][i] = node.bbox_min[2] + node.ch_bbox_max[2][i] * ext[2];
         }
+        bitmask[i] = node.ch_bitmask[i];
     }
 
     long mask = 0;
@@ -436,6 +438,10 @@ force_inline long bbox_test_oct(const float o[3], const float inv_d[3], const fl
         mask |= simd_cast(fmask).movemask();
         tmin.store_to(&out_dist[4 * i], vector_aligned);
     }) // NOLINT
+
+    ivec4 temp = ivec4{(const int *)bitmask, vector_aligned};
+    temp = ~cmpeq8(temp & reinterpret_cast<const int &>(accept_mask), ivec4{0});
+    mask &= temp.movemask8();
 #else
     UNROLLED_FOR(i, 8, { // NOLINT
         float lo_x = inv_d[0] * (bbox_min[0][i] - o[0]);
@@ -473,9 +479,10 @@ force_inline long bbox_test_oct(const float o[3], const float inv_d[3], const fl
         tmax *= 1.00000024f;
 
         out_dist[i] = tmin;
-        mask |= ((tmin <= tmax && tmin <= t && tmax > 0) ? 1 : 0) << i;
+        mask |= ((tmin <= tmax && tmin <= t && tmax > 0 && (bitmask[i] & accept_mask) != 0) ? 1 : 0) << i;
     }) // NOLINT
 #endif
+
     return mask;
 }
 
@@ -3645,6 +3652,11 @@ void Ray::Ref::IntersectAreaLights(Span<const ray_data_t> rays, Span<const light
         TraversalStack<MAX_LTREE_STACK_SIZE, light_stack_entry_t> st;
         st.push(0u /* root_index */, 0.0f /* distance */, 1.0f /* factor */);
 
+        // NOTE: triangle lights are processed separately
+        static uint32_t LightTypesMask = (1u << LIGHT_TYPE_SPHERE) | (1u << LIGHT_TYPE_DIR) | (1u << LIGHT_TYPE_LINE) |
+                                         (1u << LIGHT_TYPE_RECT) | (1u << LIGHT_TYPE_DISK) | (1u << LIGHT_TYPE_ENV);
+        static uint32_t LightTypesMask4x =
+            LightTypesMask | (LightTypesMask << 8) | (LightTypesMask << 16) | (LightTypesMask << 24);
         while (!st.empty()) {
             light_stack_entry_t cur = st.pop();
 
@@ -3655,7 +3667,8 @@ void Ray::Ref::IntersectAreaLights(Span<const ray_data_t> rays, Span<const light
             }
             if ((cur.index & LEAF_NODE_BIT) == 0) {
                 alignas(16) float dist[8];
-                long mask = bbox_test_oct(value_ptr(ro), inv_d, inout_inter.t, nodes[cur.index], dist);
+                long mask =
+                    bbox_test_oct(value_ptr(ro), inv_d, inout_inter.t, nodes[cur.index], LightTypesMask4x, dist);
                 if (mask) {
                     fvec4 importance[2];
                     calc_lnode_importance(nodes[cur.index], ro, value_ptr(importance[0]));
@@ -4475,6 +4488,9 @@ float Ray::Ref::IntersectAreaLights(const shadow_ray_t &ray, Span<const light_t>
     TraversalStack<MAX_LTREE_STACK_SIZE> st;
     st.push(0u /* root_index */, 0.0f);
 
+    static uint32_t LightTypesMask = (1u << LIGHT_TYPE_RECT) | (1u << LIGHT_TYPE_DISK);
+    static uint32_t LightTypesMask4x =
+        LightTypesMask | (LightTypesMask << 8) | (LightTypesMask << 16) | (LightTypesMask << 24);
     while (!st.empty()) {
         stack_entry_t cur = st.pop();
 
@@ -4485,7 +4501,7 @@ float Ray::Ref::IntersectAreaLights(const shadow_ray_t &ray, Span<const light_t>
     TRAVERSE:
         if ((cur.index & LEAF_NODE_BIT) == 0) {
             alignas(16) float dist[8];
-            long mask = bbox_test_oct(value_ptr(ro), inv_d, rdist, nodes[cur.index], dist);
+            long mask = bbox_test_oct(value_ptr(ro), inv_d, rdist, nodes[cur.index], LightTypesMask4x, dist);
             if (mask) {
                 long i = GetFirstBit(mask);
                 mask = ClearBit(mask, i);
